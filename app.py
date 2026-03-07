@@ -66,12 +66,12 @@ MCP_TIMEOUT    = float(os.getenv("MCP_TIMEOUT", "30"))
 MCP_SERVERS: List[Dict[str, str]] = [
     {
         "name":    "Alumnx",
-        "url":     os.getenv("ALUMNX_MCP_URL", "http://localhost:9000"),
+        "url":     os.getenv("ALUMNX_MCP_URL", "https://newapi.alumnx.com/agrigpt/mcp"),
         "api_key": os.getenv("ALUMNX_MCP_API_KEY", ""),
     },
     {
         "name":    "Vignan",
-        "url":     os.getenv("VIGNAN_MCP_URL", "http://localhost:8000"),
+        "url":     os.getenv("VIGNAN_MCP_URL", "https://newapi.alumnx.com/vignan"),
         "api_key": os.getenv("VIGNAN_MCP_API_KEY", ""),
     },
 ]
@@ -300,12 +300,6 @@ class MCPClient:
 
 
 # ============================================================
-# Global Tool Results Storage
-# ============================================================
-# Store tool results during agent execution for source extraction
-global_tool_results = {}
-
-# ============================================================
 # LangGraph State
 # ============================================================
 class State(TypedDict):
@@ -435,7 +429,10 @@ def build_agent():
 
     # ── LangGraph nodes ──────────────────────────────────────────────────────
     def agent_node(state: State):
-        return {"messages": [llm_with_tools.invoke(state["messages"])]}
+        return {
+            "messages": [llm_with_tools.invoke(state["messages"])],
+            "tool_results": state.get("tool_results", [])  # Preserve tool results
+        }
 
     def should_continue(state: State):
         last = state["messages"][-1]
@@ -444,8 +441,6 @@ def build_agent():
     # Custom tool execution node that captures results
     def tool_execution_node(state: State):
         """Execute tools and capture their results for source extraction."""
-        global global_tool_results
-        
         messages = state["messages"]
         last_message = messages[-1]
         
@@ -489,12 +484,7 @@ def build_agent():
                         'full_result': result
                     }
                     captured_results.append(tool_result_item)
-                    
-                    # Also store globally for fallback
-                    if tool_name not in global_tool_results:
-                        global_tool_results[tool_name] = []
-                    global_tool_results[tool_name].append(result)
-                    
+
                     # Create ToolMessage with stringified result
                     result_str = json.dumps(result) if isinstance(result, dict) else str(result)
                     
@@ -525,11 +515,7 @@ def build_agent():
                     'full_result': error_result
                 }
                 captured_results.append(tool_result_item)
-                
-                if tool_name not in global_tool_results:
-                    global_tool_results[tool_name] = []
-                global_tool_results[tool_name].append(error_result)
-                
+
                 tool_message = ToolMessage(
                     content=str(error_result),
                     tool_call_id=tool_id,
@@ -1018,10 +1004,13 @@ def clean_response_text(text: str) -> str:
     """
     Clean and format the response text.
     
-    Removes:
-    - Asterisks (**, *, etc.) used for markdown formatting
-    - 📚 Sources: section and sources (handled separately now)
-    - Escaped newlines (\\n) and converts them to actual newlines
+    Removes ALL markdown formatting:
+    - Headers (# ## ###)
+    - Bold/italic (** * __)
+    - Code blocks (```)
+    - Inline code (`code`)
+    - Bullet points converted to dashes
+    - Numbered lists preserved
     
     Args:
         text: Raw response text from the LLM
@@ -1032,8 +1021,22 @@ def clean_response_text(text: str) -> str:
     if not text:
         return ""
     
-    # Remove markdown formatting asterisks
-    cleaned = text.replace("**", "").replace("*", "")
+    import re
+    
+    # Remove code blocks first (triple backticks)
+    cleaned = re.sub(r'```[\s\S]*?```', '', text)
+    
+    # Remove inline code (single backticks)
+    cleaned = re.sub(r'`([^`]+)`', r'\1', cleaned)
+    
+    # Remove headers (# ## ###)
+    cleaned = re.sub(r'^#{1,6}\s+', '', cleaned)
+    
+    # Remove bold/italic markers
+    cleaned = re.sub(r'\*\*([^*]+)\*\*', r'\1', cleaned)
+    cleaned = re.sub(r'\*([^*]+)\*', r'\1', cleaned)
+    cleaned = re.sub(r'__([^_]+)__', r'\1', cleaned)
+    cleaned = re.sub(r'_([^_]+)_', r'\1', cleaned)
     
     # Convert escaped newlines to actual newlines
     cleaned = cleaned.replace("\\n", "\n")
@@ -1206,52 +1209,59 @@ def test_chat(request: ChatRequest):
     - response     → cleaned, formatted text answer
     - sources      → list of PDF filenames OR ["Gemini API"] if fallback used
     """
-    global global_tool_results
-    
     print(f"\n[/test/chat] ========== START REQUEST ==========")
     print(f"[/test/chat] chatId={request.chatId} | phone={request.phone_number}")
     print(f"[/test/chat] message={request.message[:60]}")
-    
+
     try:
-        # Clear previous tool results for this request
-        global_tool_results.clear()
-        
         # Load history first
         history = load_history(request.chatId)
         print(f"[/test/chat] Loaded {len(history)} messages from history.")
         
         # IMPORTANT: Always ensure system prompt is first in history
         # to guide the agent to use tools
-        system_prompt = SystemMessage(content="""You are AgriGPT, an expert agricultural assistant.
+        system_prompt = SystemMessage(content="""You are AgriGPT, an expert agricultural assistant powered by a knowledge base of agricultural research and resources.
 
-YOUR PRIMARY JOB: Call tools to retrieve information from knowledge base FIRST.
+YOUR MISSION: Provide accurate, helpful answers using the knowledge base tools.
 
-MANDATORY RULES - FOLLOW EXACTLY:
-1. Before answering ANY question, you MUST call at least ONE of these tools:
-   • sme_divesh: Agricultural knowledge, AI impact, farming practices
-   • pests_and_diseases: Crop diseases, pests, pest control treatments
-   • govt_schemes: Government agricultural programs and schemes
-   • VignanUniversity: Academic agricultural research and information
+TOOL USAGE (MANDATORY):
+1. Always call at least ONE tool before answering:
+   - sme_divesh: Agricultural knowledge, AI in farming, best practices
+   - pests_and_diseases: Crop diseases, pest identification, treatments
+   - govt_schemes: Government agricultural programs and subsidies
+   - VignanUniversity: Academic research and university resources
 
-2. WAIT for tool results. Use ONLY the tool results to answer.
+2. Use tool results as your PRIMARY source of information
 
-3. NEVER answer from your training data alone without calling tools.
+3. If tools don't return relevant data, acknowledge this honestly
 
-4. ALWAYS mention which tool(s) provided your information.
+RESPONSE FORMATTING RULES (CRITICAL):
+- Write in PLAIN TEXT only - NO markdown, NO special characters
+- Do NOT use: **, *, #, ##, ###, backticks `, or code blocks
+- Structure your response clearly with these elements:
+  - Start with a brief 2-3 sentence direct answer
+  - Use numbered points for steps: 1. 2. 3.
+  - Use simple dashes for lists: - item
+  - Separate sections with blank lines
+- Keep responses concise (150-300 words ideally)
+- Be conversational but professional
+- Mention which tool provided your information
 
-5. Format clearly without markdown asterisks.
+EXAMPLE GOOD RESPONSE:
+The best time to plant tomatoes is during early spring or late winter in most regions. According to the sme_divesh knowledge base:
 
-CRITICAL RULE: You MUST call tools. Every response requires tool calls. 
-If you don't call a tool, you have failed your primary job.
+1. Soil temperature should be at least 60°F (15°C)
+2. Plant seedlings 2-3 feet apart
+3. Water deeply but infrequently
 
-Example:
-User: "Tell me about AI in agriculture"
-→ You: Call sme_divesh tool with appropriate query
-→ Wait for tool results
-→ Answer based ONLY on those results
-→ Say: "According to sme_divesh tool..."
+Key considerations:
+- Choose disease-resistant varieties
+- Provide support structures like cages or stakes
+- Mulch around plants to retain moisture
 
-DO THIS FOR EVERY QUESTION. NO EXCEPTIONS.""")
+For more specific guidance for your region, consult local agricultural extension services.
+
+Remember: Clear, helpful, properly formatted responses build trust with users. Do NOT use markdown formatting.""")
         
         # Remove any existing system messages and add fresh one
         history = [msg for msg in history if not isinstance(msg, SystemMessage)]
@@ -1350,6 +1360,19 @@ DO THIS FOR EVERY QUESTION. NO EXCEPTIONS.""")
         import traceback; traceback.print_exc()
         print(f"[/test/chat] ========== REQUEST FAILED ==========\n")
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ============================================================
+# Production Chat Endpoint - Alias for /test/chat
+# ============================================================
+@app.post("/chat", response_model=ChatResponse)
+def chat(request: ChatRequest):
+    """
+    Production chat endpoint - routes to test_chat handler.
+    
+    This is the main endpoint called by backend-fastapi server.py.
+    """
+    return test_chat(request)
 
 
 # ============================================================
