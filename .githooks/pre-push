@@ -1,0 +1,31 @@
+#!/bin/sh
+# Pre-push hook: runs pytest before every git push.
+# If tests fail, the push is blocked.
+#
+# Activate once per machine: git config core.hooksPath .githooks
+
+echo "Running tests before push..."
+
+# Check if pytest is available
+if ! command -v pytest >/dev/null 2>&1; then
+  echo "pytest not found. Install with: pip install pytest pytest-asyncio httpx pytest-mock"
+  exit 1
+fi
+
+# Check if tests directory exists
+if [ ! -d "tests" ]; then
+  echo "No tests/ directory found. Run /qa in Claude Code to generate tests first."
+  exit 0
+fi
+
+pytest tests/ -v --tb=short
+
+if [ $? -ne 0 ]; then
+  echo ""
+  echo "Tests failed. Push blocked."
+  echo "Fix the failures or run /qa in Claude Code to update tests."
+  exit 1
+fi
+
+echo "All tests passed. Pushing..."
+exit 0

@@ -1,0 +1,78 @@
+name: Claude Test Generation & Auto-Run
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    paths:
+      - "**.py"
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
+jobs:
+  generate-and-run:
+    name: Update CLAUDE.md → Generate Tests → Run → Fix
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Step 1: Claude updates CLAUDE.md then generates tests
+      - name: Claude — Sync CLAUDE.md + Generate Tests
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            Read app.py and CLAUDE.md.
+
+            First, update the "Specific test cases required" section in CLAUDE.md:
+            - Add entries for any function or endpoint in app.py that is not yet documented
+            - Remove entries for anything that no longer exists in app.py
+            - Update entries where the code has changed
+            Do not modify any other section of CLAUDE.md.
+
+            Then, follow the updated Test Strategy in CLAUDE.md to generate or update tests/test_app.py and tests/__init__.py.
+
+            Commit everything: git add CLAUDE.md tests/ && git commit -m "chore: sync CLAUDE.md and tests with code changes [skip ci]" && git push
+
+      # Step 2: Install deps and run the generated tests
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        run: pip install pytest pytest-asyncio httpx pytest-mock
+
+      - name: Pull latest (Claude may have just committed tests)
+        run: git pull
+
+      - name: Run generated tests
+        id: run_tests
+        run: pytest tests/ -v --tb=short 2>&1 | tee test_output.txt
+        continue-on-error: true
+
+      # Step 3: If tests failed, Claude fixes them
+      - name: Claude — Fix Failing Tests
+        if: steps.run_tests.outcome == 'failure'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            The pytest run failed. Read test_output.txt and tests/test_app.py.
+            Fix tests/test_app.py so all tests pass, following the Test Strategy rules in CLAUDE.md.
+            Do not weaken or remove tests — fix the test code itself.
+            Commit and push: git add tests/ && git commit -m "test: fix failing tests via Claude [skip ci]" && git push
+
+      # Step 4: Re-run to confirm
+      - name: Re-run tests after fix
+        if: steps.run_tests.outcome == 'failure'
+        run: |
+          git pull
+          pytest tests/ -v --tb=short

@@ -760,6 +760,11 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
 
     return {"status": "ok"}
 
+@app.get("/hi", summary="Say Hi", tags=["Health"])
+async def hi():
+    """Returns a greeting from Claude."""
+    return {"message": "Hi Claude !!"}
+
 
 # ============================================================
 # Chat Endpoint Models

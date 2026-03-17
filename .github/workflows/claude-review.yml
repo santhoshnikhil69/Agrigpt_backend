@@ -1,0 +1,71 @@
+name: Claude PR Review & Auto-Merge
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write
+
+jobs:
+  review:
+    name: Claude Code Review
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request != null && contains(github.event.comment.body, '@claude'))
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Claude PR Review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            You are reviewing a pull request for the AgriGPT FastAPI backend agent.
+
+            Project context:
+            - FastAPI app (app.py) serving a LangGraph-powered agricultural chatbot
+            - Connects to multiple MCP servers (Alumnx, Vignan) for tool discovery
+            - Uses Google Gemini as the LLM via LangChain
+            - Stores chat history in MongoDB
+            - Deployed to EC2 via SSH (deploy.yml)
+
+            Review the changed files with these priorities from CLAUDE.md Code Review Rules:
+            1. SECURITY: API keys exposed, injection vulnerabilities, unvalidated inputs
+            2. CORRECTNESS: Logic errors, incorrect async/sync usage, MongoDB query safety
+            3. RELIABILITY: Error handling, MCP client failure scenarios, global state thread safety
+            4. FASTAPI PATTERNS: Proper response models, background tasks, status codes
+            5. LANGGRAPH/LANGCHAIN: Correct graph flow, tool binding, message handling
+
+            Respond with:
+            - A summary of what the PR does
+            - Bulleted list of issues (label: CRITICAL / WARNING / SUGGESTION)
+            - VERDICT: "APPROVED ✅", "APPROVED WITH SUGGESTIONS ✅", or "CHANGES REQUESTED ❌"
+
+  auto-merge:
+    name: Auto-Merge After Approval
+    runs-on: ubuntu-latest
+    needs: review
+    if: |
+      github.event_name == 'pull_request' &&
+      (github.event.pull_request.base.ref == 'main' || github.event.pull_request.base.ref == 'master')
+
+    steps:
+      - name: Enable Auto-Merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr merge ${{ github.event.pull_request.number }} \
+            --repo ${{ github.repository }} \
+            --squash \
+            --auto || echo "Auto-merge could not be enabled. Skipping."
