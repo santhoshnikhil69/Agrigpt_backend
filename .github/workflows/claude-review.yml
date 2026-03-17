@@ -17,38 +17,39 @@ jobs:
       contents: read
       pull-requests: write
       issues: write
+      id-token: write
 
     steps:
-      - name: Claude PR Review
-        uses: anthropic/claude-code-action@beta
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 1
+
+      - name: Claude PR Review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           direct_prompt: |
             You are reviewing a pull request for the AgriGPT FastAPI backend agent.
 
             Project context:
-            - FastAPI app (`app.py`) serving a LangGraph-powered agricultural chatbot
+            - FastAPI app (app.py) serving a LangGraph-powered agricultural chatbot
             - Connects to multiple MCP servers (Alumnx, Vignan) for tool discovery
             - Uses Google Gemini as the LLM via LangChain
             - Stores chat history in MongoDB
             - Deployed to EC2 via SSH (deploy.yml)
 
-            Review the changed files with these priorities:
-
-            1. SECURITY: API keys exposed, injection vulnerabilities, unvalidated inputs at boundaries
+            Review the changed files with these priorities from CLAUDE.md Code Review Rules:
+            1. SECURITY: API keys exposed, injection vulnerabilities, unvalidated inputs
             2. CORRECTNESS: Logic errors, incorrect async/sync usage, MongoDB query safety
-            3. RELIABILITY: Error handling, MCP client failure scenarios, global state (global_tool_results) thread safety
-            4. FASTAPI PATTERNS: Proper use of response models, background tasks, status codes
+            3. RELIABILITY: Error handling, MCP client failure scenarios, global state thread safety
+            4. FASTAPI PATTERNS: Proper response models, background tasks, status codes
             5. LANGGRAPH/LANGCHAIN: Correct graph flow, tool binding, message handling
 
             Respond with:
             - A summary of what the PR does
-            - A bulleted list of issues found (label each: CRITICAL / WARNING / SUGGESTION)
-            - A clear VERDICT at the end: "APPROVED ✅", "APPROVED WITH SUGGESTIONS ✅", or "CHANGES REQUESTED ❌"
-
-            If CRITICAL issues exist → request changes.
-            If only WARNINGs or SUGGESTIONs → approve with suggestions.
-            If clean → approve.
+            - Bulleted list of issues (label: CRITICAL / WARNING / SUGGESTION)
+            - VERDICT: "APPROVED ✅", "APPROVED WITH SUGGESTIONS ✅", or "CHANGES REQUESTED ❌"
 
   auto-merge:
     name: Auto-Merge After Approval
@@ -69,6 +70,4 @@ jobs:
           gh pr merge ${{ github.event.pull_request.number }} \
             --repo ${{ github.repository }} \
             --squash \
-            --auto \
-            --subject "$(gh pr view ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --json title -q .title)" || \
-          echo "Auto-merge could not be enabled (branch protection may need to be configured). Skipping."
+            --auto || echo "Auto-merge could not be enabled. Skipping."

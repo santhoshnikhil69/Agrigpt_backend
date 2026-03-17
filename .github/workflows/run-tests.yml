@@ -13,17 +13,18 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      id-token: write
 
     steps:
       - uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      # If tests/ doesn't exist, Claude generates them first
+      # If tests/ doesn't exist or is outdated, Claude generates them first
       - name: Claude — Generate Tests (if missing or outdated)
-        uses: anthropic/claude-code-action@beta
+        uses: anthropics/claude-code-action@v1
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           direct_prompt: |
             Read app.py and CLAUDE.md.
 
