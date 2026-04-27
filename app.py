@@ -28,6 +28,7 @@ from typing import Annotated, TypedDict, List, Dict, Any
 
 from fastapi import FastAPI, HTTPException, Request, Query, BackgroundTasks
 from fastapi.responses import PlainTextResponse
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field, create_model
 from dotenv import load_dotenv
 
@@ -53,7 +54,7 @@ if langsmith_api_key:
     os.environ["LANGCHAIN_API_KEY"]    = langsmith_api_key
     os.environ["LANGCHAIN_PROJECT"]    = "agrigpt-backend-agent"
 
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+    GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 MCP_TIMEOUT    = float(os.getenv("MCP_TIMEOUT", "30"))
 
 # ── Multi-MCP Configuration ──────────────────────────────────────────────────
@@ -174,7 +175,7 @@ class State(TypedDict):
 # ============================================================
 # Agent Builder
 # ============================================================
-def build_agent():
+def build_agent(google_api_key: str):
     # USE ONLY OUR SIMPLE TOOLS
     all_tools = [pest_simulation_tool, government_schemes_tool]
 
@@ -182,7 +183,7 @@ def build_agent():
     llm = ChatGoogleGenerativeAI(
         model="gemini-2.5-flash",
         temperature=0,
-        google_api_key=GOOGLE_API_KEY,
+        google_api_key=google_api_key,
     )
     llm_with_tools = llm.bind_tools(all_tools, tool_choice="auto")
 
@@ -295,21 +296,21 @@ def build_agent():
 # Startup
 # ============================================================
 print("\nBUILDING AGENT AT STARTUP...")
-app_agent = build_agent()
+app_agent = build_agent(GOOGLE_API_KEY or "")
 print("AGENT BUILD COMPLETE\n")
 
 
 # ============================================================
 # Gemini Fallback Handler
 # ============================================================
-def get_gemini_fallback(query: str) -> tuple[str, str]:
+def get_gemini_fallback(query: str, google_api_key: str) -> tuple[str, str]:
     """Call Gemini API directly when tools don't find answers."""
     print(f"[gemini_fallback] Calling Gemini for query: {query[:60]}")
     try:
         llm = ChatGoogleGenerativeAI(
             model="gemini-2.5-flash",
             temperature=0.7,
-            google_api_key=GOOGLE_API_KEY,
+            google_api_key=google_api_key,
         )
         
         response = llm.invoke([
@@ -538,6 +539,11 @@ def has_meaningful_tool_results(tool_results: List[Dict[str, Any]]) -> bool:
 app = FastAPI(title="AgriGPT Agent")
 
 
+@app.get("/", summary="Health Check", tags=["Health"])
+async def root():
+    return RedirectResponse(url="/docs")
+
+
 @app.get("/webhook")
 async def verify_webhook(
     hub_mode:         str = Query(None, alias="hub.mode"),
@@ -589,6 +595,35 @@ async def hi():
     return {"message": "Hi Claude !!"}
 
 
+@app.get("/health", summary="Health Status", tags=["Health"])
+async def health():
+    """Simple health check endpoint."""
+    return {"status": "ok"}
+
+
+class PestToolRequest(BaseModel):
+    crop_name: str
+    location: str = "general"
+
+
+class SchemeToolRequest(BaseModel):
+    state: str = "India"
+
+
+@app.post("/tools/pests", tags=["Tools"])
+async def tools_pests(request: PestToolRequest):
+    """Direct endpoint to run pest simulation tool."""
+    result = simulate_pests(request.crop_name, request.location)
+    return {"tool": "simulate_pests", "result": result}
+
+
+@app.post("/tools/schemes", tags=["Tools"])
+async def tools_schemes(request: SchemeToolRequest):
+    """Direct endpoint to run government schemes tool."""
+    result = get_government_schemes(request.state)
+    return {"tool": "government_schemes", "result": result}
+
+
 # ============================================================
 # Chat Endpoint Models
 # ============================================================
@@ -596,6 +631,7 @@ class ChatRequest(BaseModel):
     chatId:       str
     phone_number: str
     message:      str
+    api_key:      str | None = None
 
 
 class ChatResponse(BaseModel):
@@ -622,6 +658,10 @@ def test_chat(request: ChatRequest):
     print(f"[/test/chat] message={request.message[:60]}")
 
     try:
+        runtime_google_api_key = (request.api_key or GOOGLE_API_KEY or "").strip()
+        if not runtime_google_api_key:
+            raise HTTPException(status_code=400, detail="Google API key is required.")
+
         # ✅ Clear previous tool results for this request
         global_tool_results.clear()
         
@@ -647,7 +687,8 @@ RESPONSE FORMATTING:
         
         # ========== STEP 1: Invoke agent ==========
         print("\n[STEP 1] Invoking agent...")
-        result = app_agent.invoke({"messages": history})
+        request_agent = build_agent(runtime_google_api_key)
+        result = request_agent.invoke({"messages": history})
         print(f"[STEP 1] Agent returned {len(result['messages'])} messages")
         
         final_answer = extract_final_answer(result)
@@ -674,7 +715,7 @@ RESPONSE FORMATTING:
                 sources = ["Knowledge Base"]
         else:
             print("[STEP 3] ❌ Tools found no results - using Gemini fallback")
-            gemini_answer, gemini_status = get_gemini_fallback(request.message)
+            gemini_answer, gemini_status = get_gemini_fallback(request.message, runtime_google_api_key)
             
             if gemini_status == "success":
                 final_answer = f"I couldn't find specific information in the knowledge base. Based on general agricultural knowledge:\n\n{gemini_answer}"
@@ -712,4 +753,6 @@ def chat(request: ChatRequest):
 # ============================================================
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8030)
+    host = os.getenv("HOST", "127.0.0.1")
+    port = int(os.getenv("PORT", "8030"))
+    uvicorn.run(app, host=host, port=port)
